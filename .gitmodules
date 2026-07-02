@@ -1,0 +1,3 @@
+[submodule "denovo_assembler"]
+	path = denovo_assembler
+	url = git@github.com:mesti90/denovo_assembler.git
