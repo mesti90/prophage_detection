@@ -1,0 +1,6 @@
+use-singularity: true
+singularity-args: "-B /node8_R10,/node10_R10,/scratch --cleanenv"
+
+printshellcmds: true
+rerun-incomplete: true
+keep-going: true

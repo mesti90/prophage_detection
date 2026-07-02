@@ -1,0 +1,123 @@
+import pandas as pd
+import json
+import requests
+from pathlib import Path
+
+METADATA = "samples.tsv"
+
+OUTDIR = "results"
+ASSEMBLY_DIR = f"{OUTDIR}/assemblies"
+GENOMAD_DIR = f"{OUTDIR}/genomad"
+MAP_FILE = f"{OUTDIR}/biosample_to_assembly.tsv"
+
+
+df = pd.read_csv(METADATA, sep="\t")
+df.columns = [x.strip().lower() for x in df.columns]
+
+df = df.dropna(subset=["strain", "biosample"])
+
+df["strain"] = df["strain"].astype(str).str.strip()
+df["biosample"] = df["biosample"].astype(str).str.strip()
+
+df = df.drop_duplicates("strain")
+
+STRAINS = df["strain"].tolist()
+BIOSAMPLES = dict(zip(df["strain"], df["biosample"]))
+
+VALID_STRAINS = [ s for s in STRAINS if s in BIOSAMPLES and pd.notna(BIOSAMPLES[s]) ]
+
+rule all:
+	input:
+		expand(f"{GENOMAD_DIR}/{{strain}}/genomad.done", strain=VALID_STRAINS),
+		MAP_FILE
+
+rule download_assembly:
+	output:
+		fasta=f"{ASSEMBLY_DIR}/{{strain}}.fasta",
+		skipped=f"{ASSEMBLY_DIR}/{{strain}}.skipped"
+
+	threads: 1
+
+	run:
+		strain = wildcards.strain
+
+		if strain not in BIOSAMPLES:
+			Path(output.skipped).touch()
+			return
+
+		biosample = BIOSAMPLES[strain]
+
+		Path(output.fasta).parent.mkdir(parents=True, exist_ok=True)
+
+		url = f"https://www.ebi.ac.uk/ena/browser/api/fasta/links/sample?accession={biosample}&result=sequence"
+
+		try:
+			print(url)
+			r = requests.get(url, timeout=60)
+
+			valid = r.ok and r.text and (">" in r.text)
+
+			if not valid:
+				Path(output.skipped).touch()
+				Path(output.fasta).unlink(missing_ok=True)
+				return
+
+			with open(output.fasta, "w") as f:
+				f.write(r.text.strip() + "\n")
+
+		except Exception:
+			Path(output.skipped).touch()
+			Path(output.fasta).unlink(missing_ok=True)
+
+# -----------------------------
+# geNomad
+# -----------------------------
+rule genomad:
+	input:
+		fasta=f"{ASSEMBLY_DIR}/{{strain}}.fasta",
+		skip=f"{ASSEMBLY_DIR}/{{strain}}.skipped"
+
+	output:
+		done=f"{GENOMAD_DIR}/{{strain}}/genomad.done"
+
+	threads: 8
+
+	container:
+		"quay.io/biocontainers/genomad:latest"
+
+	shell:
+		r"""
+		set -euo pipefail
+
+		# skip if assembly missing
+		if [ -f {input.skip} ]; then
+			mkdir -p {GENOMAD_DIR}/{wildcards.strain}
+			touch {output.done}
+			exit 0
+		fi
+
+		mkdir -p {GENOMAD_DIR}/{wildcards.strain}
+
+		genomad end-to-end \
+			{input.fasta} \
+			{GENOMAD_DIR}/{wildcards.strain} \
+			--threads {threads}
+
+		touch {output.done}
+		"""
+
+rule make_map:
+	input:
+		expand(f"{ASSEMBLY_DIR}/{{strain}}.fasta", strain=STRAINS)
+
+	output:
+		MAP_FILE
+
+	run:
+		with open(output[0], "w") as f:
+			f.write("strain\tbiosample\tassembly\n")
+
+			for strain in STRAINS:
+				fasta = f"{ASSEMBLY_DIR}/{strain}.fasta"
+				if Path(fasta).exists():
+					f.write(f"{strain}\t{BIOSAMPLES[strain]}\t{fasta}\n")
